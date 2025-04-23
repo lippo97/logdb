@@ -1,7 +1,13 @@
-use std::{collections::BTreeMap, path::Path, u64};
-use sstable_set::{SSTable, SSTableSet};
-use tokio::{fs::File, io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter, Error, ErrorKind, Result, SeekFrom}};
 use log;
+use sstable_set::{SSTable, SSTableSet};
+use std::{collections::BTreeMap, path::Path, u64};
+use tokio::{
+    fs::File,
+    io::{
+        AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufReader,
+        BufWriter, Error, ErrorKind, Result, SeekFrom,
+    },
+};
 
 mod config;
 mod manifest;
@@ -9,9 +15,9 @@ mod sparse_index;
 mod sstable_set;
 mod version;
 
-pub use manifest::Manifest;
 pub use config::Config;
-use sparse_index::{SparseIndex, ScanRange};
+pub use manifest::Manifest;
+use sparse_index::{ScanRange, SparseIndex};
 
 type MemTable = BTreeMap<String, String>;
 
@@ -38,11 +44,17 @@ impl Database {
             }
         } else {
             if !config.create_if_missing {
-                log::error!("Can't find manifest file: {} (`create_if_missing = false`)", &manifest_path);
+                log::error!(
+                    "Can't find manifest file: {} (`create_if_missing = false`)",
+                    &manifest_path
+                );
                 return Err(tokio::io::Error::new(
-                        tokio::io::ErrorKind::NotFound,
-                        format!("No such file {} (with option `create_if_missing = false`)", &manifest_path)
-                ))
+                    tokio::io::ErrorKind::NotFound,
+                    format!(
+                        "No such file {} (with option `create_if_missing = false`)",
+                        &manifest_path
+                    ),
+                ));
             }
 
             let manifest = Manifest {
@@ -55,8 +67,9 @@ impl Database {
             log::info!("Creating manifest file: {}...", &manifest_path);
             manifest::write_manifest(
                 &manifest,
-                &mut tokio::io::BufWriter::new(tokio::fs::File::create(&manifest_path).await?)
-            ).await?;
+                &mut tokio::io::BufWriter::new(tokio::fs::File::create(&manifest_path).await?),
+            )
+            .await?;
             log::info!("Done.");
 
             manifest
@@ -65,27 +78,31 @@ impl Database {
         log::info!("Using configuration: {:#?}", manifest);
         let sstable_set = SSTableSet::build(&config, &manifest).await?;
 
-        Ok(
-            Database {
-                config,
-                sstable_set,
-                memtable: BTreeMap::new(),
-            }
-        )
+        Ok(Database {
+            config,
+            sstable_set,
+            memtable: BTreeMap::new(),
+        })
     }
 
     pub async fn flush(&mut self) -> Result<()> {
         let next_sequence = self.sstable_set.last_sequence + 1;
         let data_path = format!("{:0>5}.db", next_sequence);
         let index_path = format!("{:0>5}.idx", next_sequence);
-        let mut data_writer = BufWriter::new(tokio::fs::File::create(self.config.data_dir.join(&data_path)).await?);
-        let mut index_writer = BufWriter::new(tokio::fs::File::create(self.config.data_dir.join(&index_path)).await?);
+        let mut data_writer =
+            BufWriter::new(tokio::fs::File::create(self.config.data_dir.join(&data_path)).await?);
+        let mut index_writer =
+            BufWriter::new(tokio::fs::File::create(self.config.data_dir.join(&index_path)).await?);
 
         let mut index = SparseIndex::new();
         let mut offset: u64 = 0;
 
         let entries = std::mem::take(&mut self.memtable);
-        log::info!("Flushing memtable to {} ({} entries)...", data_path, entries.len());
+        log::info!(
+            "Flushing memtable to {} ({} entries)...",
+            data_path,
+            entries.len()
+        );
         for (i, (key, value)) in entries.into_iter().enumerate() {
             let len = write_record(&mut data_writer, &key, &value).await?;
 
@@ -98,23 +115,29 @@ impl Database {
 
         log::info!("Writing index to {}...", index_path);
         let sparse_index_fut = sparse_index::write_sparse_index(&index, &mut index_writer);
-        let (data_res, index_res) = futures::future::join(
-            data_writer.flush(),
-            sparse_index_fut,
-        ).await;
+        let (data_res, index_res) =
+            futures::future::join(data_writer.flush(), sparse_index_fut).await;
         data_res?;
         index_res?;
         log::info!("Done.");
 
-        self.sstable_set.tables.insert(0, SSTable { index, data_path, index_path });
+        self.sstable_set.tables.insert(
+            0,
+            SSTable {
+                index,
+                data_path,
+                index_path,
+            },
+        );
         self.sstable_set.last_sequence = next_sequence;
 
         let manifest_path = Database::get_manifest_path(&self.config.data_dir);
         log::info!("Writing manifest file: {}...", &manifest_path);
         manifest::write_manifest(
             &Manifest::new(&self.sstable_set),
-            &mut tokio::io::BufWriter::new(tokio::fs::File::create(&manifest_path).await?)
-        ).await?;
+            &mut tokio::io::BufWriter::new(tokio::fs::File::create(&manifest_path).await?),
+        )
+        .await?;
         log::info!("Done.");
         Ok(())
     }
@@ -124,12 +147,16 @@ impl Database {
         let value = mem.get(key);
 
         if value.is_some() {
-            return Ok(value.cloned())
-        } 
+            return Ok(value.cloned());
+        }
 
-        for SSTable { index, data_path, .. } in &self.sstable_set.tables {
+        for SSTable {
+            index, data_path, ..
+        } in &self.sstable_set.tables
+        {
             let range = sparse_index::bounds(&index, key);
-            let read = Database::seek_and_read(&self.config.data_dir.join(data_path), key, range).await?;
+            let read =
+                Database::seek_and_read(&self.config.data_dir.join(data_path), key, range).await?;
             if read.is_some() {
                 return Ok(read);
             }
@@ -147,7 +174,11 @@ impl Database {
         Ok(mem.remove(key))
     }
 
-    async fn seek_and_read(file: &Path, key: &str, scan_range: ScanRange) -> Result<Option<String>> {
+    async fn seek_and_read(
+        file: &Path,
+        key: &str,
+        scan_range: ScanRange,
+    ) -> Result<Option<String>> {
         let mut file = BufReader::new(File::open(file).await?);
 
         match scan_range {
@@ -157,25 +188,23 @@ impl Database {
                     panic!("Exact key read doesn't match expected key: read_key={read_key}");
                 }
                 Ok(Some(read_value))
-            },
+            }
             ScanRange::FromBegin { end } => {
                 Database::scan_range(&mut file, key, None, Some(end)).await
-            },
+            }
             ScanRange::ToEnd { start } => {
                 Database::scan_range(&mut file, key, Some(start), None).await
-            },
+            }
             ScanRange::Range { start, end } => {
                 Database::scan_range(&mut file, key, Some(start), Some(end)).await
             }
         }
     }
 
-    async fn read_exact<R>(
-        reader: &mut R,
-        offset: u64
-    ) -> tokio::io::Result<(String, String)>
-where
-    R : AsyncRead + AsyncSeek + Unpin {
+    async fn read_exact<R>(reader: &mut R, offset: u64) -> tokio::io::Result<(String, String)>
+    where
+        R: AsyncRead + AsyncSeek + Unpin,
+    {
         let mut len_buf = [0u8; 2];
 
         reader.seek(std::io::SeekFrom::Start(offset)).await?;
@@ -194,7 +223,7 @@ where
 
         Ok((
             String::from_utf8(key_buf).unwrap(),
-            String::from_utf8(val_buf).unwrap()
+            String::from_utf8(val_buf).unwrap(),
         ))
     }
 
@@ -202,10 +231,11 @@ where
         reader: &mut R,
         key: &str,
         start: Option<u64>,
-        end: Option<u64>
+        end: Option<u64>,
     ) -> Result<Option<String>>
     where
-        R: AsyncRead + AsyncSeek + Unpin {
+        R: AsyncRead + AsyncSeek + Unpin,
+    {
         assert!(
             start.is_some() || end.is_some(),
             "At least one of `start` or `end` must be provided"
@@ -216,18 +246,20 @@ where
         let mut offset = start.unwrap_or(0);
         let end_offset = end.unwrap_or(u64::MAX);
 
-        reader.seek(std::io::SeekFrom::Start(start.unwrap_or_default())).await?;
+        reader
+            .seek(std::io::SeekFrom::Start(start.unwrap_or_default()))
+            .await?;
 
         loop {
             if offset > end_offset {
-                return Ok(None)
+                return Ok(None);
             }
 
             if let Err(e) = reader.read_exact(&mut len_buf).await {
                 if e.kind() == ErrorKind::UnexpectedEof {
-                    return Ok(None)
+                    return Ok(None);
                 }
-                return Err(e)
+                return Err(e);
             }
 
             let key_len = u16::from_be_bytes(len_buf) as usize;
@@ -245,7 +277,7 @@ where
                 reader.read_exact(&mut val_buf).await?;
                 let val_str = String::from_utf8(val_buf)
                     .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-                return Ok(Some(val_str))
+                return Ok(Some(val_str));
             }
 
             reader.seek(SeekFrom::Current(val_len as i64)).await?;
@@ -255,12 +287,19 @@ where
     }
 
     fn get_manifest_path(data_dir: &Path) -> String {
-        data_dir.join("MANIFEST").into_os_string().into_string().unwrap()
+        data_dir
+            .join("MANIFEST")
+            .into_os_string()
+            .into_string()
+            .unwrap()
     }
-
 }
 
-async fn write_record<W: AsyncWrite + Unpin>(writer: &mut W, key: &str, value: &str) -> Result<u64> {
+async fn write_record<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    key: &str,
+    value: &str,
+) -> Result<u64> {
     let key_bytes = key.as_bytes();
     let val_bytes = value.as_bytes();
     let key_len = key_bytes.len() as u16;
@@ -274,4 +313,3 @@ async fn write_record<W: AsyncWrite + Unpin>(writer: &mut W, key: &str, value: &
 
     Ok(offset)
 }
-

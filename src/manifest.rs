@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use tokio::io::{AsyncWrite, AsyncWriteExt, Result};
 
 use crate::sstable_set::SSTableSet;
@@ -20,11 +20,12 @@ pub struct SSTableEntry {
 
 impl Manifest {
     pub fn new(sstable_set: &SSTableSet) -> Manifest {
-        let sstables = sstable_set.tables.iter().map(|table| {
-                SSTableEntry {
-                    data_path: table.data_path.clone().into(),
-                    index_path: table.index_path.clone().into(),
-                }
+        let sstables = sstable_set
+            .tables
+            .iter()
+            .map(|table| SSTableEntry {
+                data_path: table.data_path.clone().into(),
+                index_path: table.index_path.clone().into(),
             })
             .collect();
         Self {
@@ -35,12 +36,16 @@ impl Manifest {
     }
 }
 
-pub async fn write_manifest<W: AsyncWrite + Unpin>(manifest: &Manifest, writer: &mut W) -> Result<()> {
-    let serialized = toml::to_string(&manifest)
-        .map_err(|_| tokio::io::Error::new(
+pub async fn write_manifest<W: AsyncWrite + Unpin>(
+    manifest: &Manifest,
+    writer: &mut W,
+) -> Result<()> {
+    let serialized = toml::to_string(&manifest).map_err(|_| {
+        tokio::io::Error::new(
             tokio::io::ErrorKind::InvalidData,
-            format!("Unable to serialize {:?}", manifest)
-        ))?;
+            format!("Unable to serialize {:?}", manifest),
+        )
+    })?;
 
     writer.write_all(serialized.as_bytes()).await?;
     writer.flush().await

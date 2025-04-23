@@ -11,7 +11,8 @@ async fn main() -> Result<()> {
         sparse_stride: 20,
         memtable_capacity: 1000,
         create_if_missing: true,
-    }).await?;
+    })
+    .await?;
 
     // load_words_into_db(&mut database).await
     repl(&mut database).await
@@ -43,14 +44,19 @@ async fn repl(database: &mut Database) -> Result<()> {
 async fn parse(command: &str, database: &mut Database) -> Result<()> {
     let args: Vec<_> = command.split_whitespace().collect();
 
-    match args.get(0)  {
+    match args.get(0) {
         Some(&"get") => {
             let value = database.get(args.get(1).unwrap()).await?;
             println!("{}", value.unwrap_or("(none)".to_string()));
-        },
+        }
         Some(&"set") => {
-            database.set(args.get(1).unwrap().to_string(), args.get(2).unwrap().to_string()).await?;
-        },
+            database
+                .set(
+                    args.get(1).unwrap().to_string(),
+                    args.get(2).unwrap().to_string(),
+                )
+                .await?;
+        }
         Some(&"flush") => database.flush().await?,
         _ => (),
     };
@@ -60,10 +66,7 @@ async fn parse(command: &str, database: &mut Database) -> Result<()> {
 
 async fn load_words_into_db(database: &mut Database) -> Result<()> {
     let content = tokio::fs::read_to_string("words.txt").await?;
-    let lines: Vec<_> = content
-        .lines()
-        .map(|line| line.to_string())
-        .collect();
+    let lines: Vec<_> = content.lines().map(|line| line.to_string()).collect();
 
     for line in lines {
         let reversed = line.chars().rev().collect();

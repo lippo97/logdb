@@ -12,10 +12,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             data_dir: PathBuf::from("./data"),
-            sparse_stride: 50, 
+            sparse_stride: 50,
             memtable_capacity: 1000,
             create_if_missing: true,
         }
     }
 }
-
