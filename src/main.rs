@@ -1,4 +1,9 @@
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Result};
+use std::sync::Arc;
+
+use tokio::{
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Error, Result},
+    net::TcpListener, sync::RwLock,
+};
 
 use my_database::{Config, Database, Value};
 
@@ -6,34 +11,50 @@ use my_database::{Config, Database, Value};
 async fn main() -> Result<()> {
     env_logger::init();
 
-    let mut database = Database::build(Config {
-        data_dir: "data".into(),
-        sparse_stride: 20,
-        memtable_capacity: 1000,
-        create_if_missing: true,
-    })
-    .await?;
+    let database = Arc::new(RwLock::new(Database::build(Config {
+            data_dir: "data".into(),
+            sparse_stride: 20,
+            memtable_capacity: 1000,
+            create_if_missing: true,
+        })
+        .await?));
 
-    // load_words_into_db(&mut database).await
-    repl(&mut database).await
-}
-
-async fn repl(database: &mut Database) -> Result<()> {
-    let stdin = BufReader::new(tokio::io::stdin());
-    let mut lines = stdin.lines();
-    let mut stdout = tokio::io::stdout();
+    let listener = TcpListener::bind("127.0.0.1:2345").await?;
 
     loop {
-        stdout.write_all(b"> ").await?;
-        stdout.flush().await?;
+        let (socket, conn) = listener.accept().await?;
+        let (read, mut write) = tokio::io::split(socket);
+        let read = BufReader::new(read);
+
+        let db = database.clone();
+        tokio::spawn(async move {
+            log::info!("Client connection from {}:{}", conn.ip(), conn.port());
+            repl(db, read, &mut write).await?;
+            log::info!("Closed connection from {}:{}", conn.ip(), conn.port());
+            Ok::<_, Error>(())
+        });
+    }
+}
+
+async fn repl<R, W>(database: Arc<RwLock<Database>>, input: R, output: &mut W) -> Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut lines = input.lines();
+    let db = database.clone();
+
+    loop {
+        output.write_all(b"> ").await?;
+        output.flush().await?;
 
         if let Some(line) = lines.next_line().await? {
             let line = line.trim();
             if line == "exit" {
-                stdout.write_all(b"bye.\n").await?;
+                output.write_all(b"bye.\n").await?;
                 break;
             }
-            parse(line, database).await?;
+            parse(line, db.clone(), output).await?;
         } else {
             break;
         }
@@ -41,33 +62,43 @@ async fn repl(database: &mut Database) -> Result<()> {
     Ok(())
 }
 
-async fn parse(command: &str, database: &mut Database) -> Result<()> {
+async fn parse<W: AsyncWrite + Unpin>(
+    command: &str,
+    database: Arc<RwLock<Database>>,
+    output: &mut W,
+) -> Result<()> {
     let args: Vec<_> = command.split_whitespace().collect();
 
     match args.get(0) {
         Some(&"get") => {
-            let value = database.get(args.get(1).unwrap()).await?.map(|x| match x {
-                Value::Str(s) => s,
-                Value::Int64(i) => format!("i:{}", i.to_string()),
-                Value::Float64(f) => format!("f:{}", f.to_string()),
-            });
+            let value = database
+                .read().await
+                .get(args.get(1).unwrap())
+                .await?
+                .map(|x| match x {
+                    Value::Str(s) => s,
+                    Value::Int64(i) => format!("i:{}", i.to_string()),
+                    Value::Float64(f) => format!("f:{}", f.to_string()),
+                })
+                .unwrap_or("(none)".to_string())
+                + "\n";
 
-            println!("{}", value.unwrap_or("(none)".to_string()));
+            output.write_all(value.as_bytes()).await?;
+            output.flush().await
         }
         Some(&"set") => {
             database
+                .write().await
                 .set(
                     args.get(1).unwrap().to_string(),
                     parse_value(args.get(2).unwrap()),
                 )
-                .await?;
+                .await
         }
-        Some(&"delete") => database.delete(args.get(1).unwrap().to_string()).await?,
-        Some(&"flush") => database.flush().await?,
-        _ => (),
-    };
-
-    Ok(())
+        Some(&"delete") => database.write().await.delete(args.get(1).unwrap().to_string()).await,
+        Some(&"flush") => database.write().await.flush().await,
+        _ => Ok(()),
+    }
 }
 
 fn parse_value(input: &str) -> Value {
@@ -85,14 +116,14 @@ fn parse_value(input: &str) -> Value {
     Value::Str(input.to_string())
 }
 
-async fn load_words_into_db(database: &mut Database) -> Result<()> {
-    let content = tokio::fs::read_to_string("words.txt").await?;
-    let lines: Vec<_> = content.lines().map(|line| line.to_string()).collect();
-
-    for line in lines {
-        let reversed = Value::Str(line.chars().rev().collect());
-        database.set(line, reversed).await?;
-    }
-
-    database.flush().await
-}
+// async fn load_words_into_db(database: &mut Database) -> Result<()> {
+//     let content = tokio::fs::read_to_string("words.txt").await?;
+//     let lines: Vec<_> = content.lines().map(|line| line.to_string()).collect();
+//
+//     for line in lines {
+//         let reversed = Value::Str(line.chars().rev().collect());
+//         database.set(line, reversed).await?;
+//     }
+//
+//     database.flush().await
+// }

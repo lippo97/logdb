@@ -17,9 +17,8 @@ mod version;
 
 pub use config::Config;
 pub use manifest::Manifest;
-pub use record::Value;
 use memtable::MemTable;
-
+pub use record::Value;
 
 #[derive(Debug)]
 pub struct Database {
@@ -57,7 +56,12 @@ impl Database {
             data_path,
             self.memtable.len(),
         );
-        let index = memtable::flush_to(&mut self.memtable, &mut data_writer, self.config.sparse_stride).await?;
+        let index = memtable::flush_to(
+            &mut self.memtable,
+            &mut data_writer,
+            self.config.sparse_stride,
+        )
+        .await?;
 
         log::info!("Writing index to {}...", index_path);
         sparse_index::write_to(&index, &mut index_writer).await?;
@@ -87,7 +91,6 @@ impl Database {
         log::info!("Done.");
         Ok(())
     }
-
 
     pub async fn get(&self, key: &str) -> Result<Option<Value>> {
         let value = self.memtable.get(key);
