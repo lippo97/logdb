@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 
 use tokio::io::{AsyncWrite, Result};
 
-use crate::{record::{MemValue, Record}, sparse_index::SparseIndex};
+use crate::{
+    record::{MemValue, Record},
+    sparse_index::SparseIndex,
+};
 
 pub type MemTable = BTreeMap<String, MemValue>;
 
@@ -29,7 +32,11 @@ pub type MemTable = BTreeMap<String, MemValue>;
 /// # Errors
 ///
 /// Returns an error if writing to the output stream fails.
-pub async fn flush_to<W: AsyncWrite + Unpin>(memtable: &mut MemTable, writer: &mut W, index_stride: usize) -> Result<SparseIndex> {
+pub async fn flush_to<W: AsyncWrite + Unpin>(
+    memtable: &mut MemTable,
+    writer: &mut W,
+    index_stride: usize,
+) -> Result<SparseIndex> {
     let mut index = SparseIndex::new();
     let mut offset: u64 = 0;
 

@@ -2,11 +2,10 @@ use std::io::SeekFrom;
 use std::path::Path;
 
 use tokio::io::{
-    AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, BufReader, Error,
-    ErrorKind, Result,
+    AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, BufReader, Error, ErrorKind, Result,
 };
 
-use crate::record::{Record, MemValue};
+use crate::record::{MemValue, Record};
 use crate::sparse_index::ScanRange;
 use crate::version;
 use crate::{
@@ -102,7 +101,10 @@ where
         ScanRange::Exact { offset } => {
             let record = read_exact(file, offset).await?;
             if record.key != key {
-                panic!("Exact key read doesn't match expected key: read_key={}", &record.key);
+                panic!(
+                    "Exact key read doesn't match expected key: read_key={}",
+                    &record.key
+                );
             }
             Ok(Some(record.value))
         }
@@ -142,9 +144,7 @@ where
     let mut offset = start.unwrap_or(0);
     let end_offset = end.unwrap_or(u64::MAX);
 
-    reader
-        .seek(std::io::SeekFrom::Start(offset))
-        .await?;
+    reader.seek(std::io::SeekFrom::Start(offset)).await?;
 
     loop {
         if offset > end_offset {
@@ -174,7 +174,7 @@ where
             let mut val_buf = vec![0u8; val_len];
             reader.read_exact(&mut val_buf).await?;
             let value = MemValue::deserialize(type_tag_buf[0], &val_buf);
-            return value.map(|x| Some(x))
+            return value.map(|x| Some(x));
         }
 
         reader.seek(SeekFrom::Current(val_len as i64)).await?;
