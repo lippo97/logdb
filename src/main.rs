@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Error, Result},
-    net::TcpListener, sync::RwLock,
+    net::TcpListener,
+    sync::RwLock,
 };
 
 use my_database::{Config, Database, Value};
@@ -11,13 +12,15 @@ use my_database::{Config, Database, Value};
 async fn main() -> Result<()> {
     env_logger::init();
 
-    let database = Arc::new(RwLock::new(Database::build(Config {
+    let database = Arc::new(RwLock::new(
+        Database::build(Config {
             data_dir: "data".into(),
             sparse_stride: 20,
             memtable_capacity: 1000,
             create_if_missing: true,
         })
-        .await?));
+        .await?,
+    ));
 
     let listener = TcpListener::bind("127.0.0.1:2345").await?;
 
@@ -42,7 +45,6 @@ where
     W: AsyncWrite + Unpin,
 {
     let mut lines = input.lines();
-    let db = database.clone();
 
     loop {
         output.write_all(b"> ").await?;
@@ -54,7 +56,7 @@ where
                 output.write_all(b"bye.\n").await?;
                 break;
             }
-            parse(line, db.clone(), output).await?;
+            parse(line, &database, output).await?;
         } else {
             break;
         }
@@ -64,7 +66,7 @@ where
 
 async fn parse<W: AsyncWrite + Unpin>(
     command: &str,
-    database: Arc<RwLock<Database>>,
+    database: &Arc<RwLock<Database>>,
     output: &mut W,
 ) -> Result<()> {
     let args: Vec<_> = command.split_whitespace().collect();
@@ -72,7 +74,8 @@ async fn parse<W: AsyncWrite + Unpin>(
     match args.get(0) {
         Some(&"get") => {
             let value = database
-                .read().await
+                .read()
+                .await
                 .get(args.get(1).unwrap())
                 .await?
                 .map(|x| match x {
@@ -88,14 +91,21 @@ async fn parse<W: AsyncWrite + Unpin>(
         }
         Some(&"set") => {
             database
-                .write().await
+                .write()
+                .await
                 .set(
                     args.get(1).unwrap().to_string(),
                     parse_value(args.get(2).unwrap()),
                 )
                 .await
         }
-        Some(&"delete") => database.write().await.delete(args.get(1).unwrap().to_string()).await,
+        Some(&"delete") => {
+            database
+                .write()
+                .await
+                .delete(args.get(1).unwrap().to_string())
+                .await
+        }
         Some(&"flush") => database.write().await.flush().await,
         _ => Ok(()),
     }
