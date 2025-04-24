@@ -2,10 +2,11 @@ use std::io::SeekFrom;
 use std::path::Path;
 
 use tokio::io::{
-    AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufReader, Error,
+    AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, BufReader, Error,
     ErrorKind, Result,
 };
 
+use crate::record::{Record, MemValue};
 use crate::sparse_index::ScanRange;
 use crate::version;
 use crate::{
@@ -51,7 +52,7 @@ impl SSTableSet {
                     );
                     let reader =
                         BufReader::new(tokio::fs::File::open(data_dir.join(&index_path)).await?);
-                    let index = sparse_index::read_sparse_index(reader).await?;
+                    let index = sparse_index::read_from(reader).await?;
                     if index.len() == 0 {
                         return Err(Error::new(ErrorKind::InvalidData, "Index can't be empty"));
                     }
@@ -89,40 +90,21 @@ impl SSTableSet {
     }
 }
 
-pub async fn write_record<W: AsyncWrite + Unpin>(
-    writer: &mut W,
-    key: &str,
-    value: &str,
-) -> Result<u64> {
-    let key_bytes = key.as_bytes();
-    let val_bytes = value.as_bytes();
-    let key_len = key_bytes.len() as u16;
-    let val_len = val_bytes.len() as u16;
-
-    let mut offset = 0;
-    offset += writer.write(&key_len.to_be_bytes()).await? as u64;
-    offset += writer.write(&val_len.to_be_bytes()).await? as u64;
-    offset += writer.write(key_bytes).await? as u64;
-    offset += writer.write(val_bytes).await? as u64;
-
-    Ok(offset)
-}
-
 pub async fn seek_and_read<R>(
     file: &mut R,
     key: &str,
     scan_range: ScanRange,
-) -> Result<Option<String>>
+) -> Result<Option<MemValue>>
 where
     R: AsyncRead + AsyncSeek + Unpin,
 {
     match scan_range {
         ScanRange::Exact { offset } => {
-            let (read_key, read_value) = read_exact(file, offset).await?;
-            if read_key != key {
-                panic!("Exact key read doesn't match expected key: read_key={read_key}");
+            let record = read_exact(file, offset).await?;
+            if record.key != key {
+                panic!("Exact key read doesn't match expected key: read_key={}", &record.key);
             }
-            Ok(Some(read_value))
+            Ok(Some(record.value))
         }
         ScanRange::FromBegin { end } => scan_file_for_key(file, key, None, Some(end)).await,
         ScanRange::ToEnd { start } => scan_file_for_key(file, key, Some(start), None).await,
@@ -132,30 +114,12 @@ where
     }
 }
 
-async fn read_exact<R>(reader: &mut R, offset: u64) -> tokio::io::Result<(String, String)>
+async fn read_exact<R>(reader: &mut R, offset: u64) -> tokio::io::Result<Record>
 where
     R: AsyncRead + AsyncSeek + Unpin,
 {
-    let mut len_buf = [0u8; 2];
-
     reader.seek(std::io::SeekFrom::Start(offset)).await?;
-
-    reader.read_exact(&mut len_buf).await?;
-    let key_len = u16::from_be_bytes(len_buf) as usize;
-
-    reader.read_exact(&mut len_buf).await?;
-    let val_len = u16::from_be_bytes(len_buf) as usize;
-
-    let mut key_buf = vec![0u8; key_len];
-    let mut val_buf = vec![0u8; val_len];
-
-    reader.read_exact(&mut key_buf).await?;
-    reader.read_exact(&mut val_buf).await?;
-
-    Ok((
-        String::from_utf8(key_buf).unwrap(),
-        String::from_utf8(val_buf).unwrap(),
-    ))
+    Record::read_from(reader).await
 }
 
 async fn scan_file_for_key<R>(
@@ -163,7 +127,7 @@ async fn scan_file_for_key<R>(
     key: &str,
     start: Option<u64>,
     end: Option<u64>,
-) -> Result<Option<String>>
+) -> Result<Option<MemValue>>
 where
     R: AsyncRead + AsyncSeek + Unpin,
 {
@@ -172,13 +136,14 @@ where
         "At least one of `start` or `end` must be provided"
     );
 
-    let mut len_buf = [0u8; 2];
+    let mut len_buf = [0u8; 2]; // shared buffer for {key,val}_len
     let mut key_buf = Vec::with_capacity(256);
+    let mut type_tag_buf = [0u8; 1];
     let mut offset = start.unwrap_or(0);
     let end_offset = end.unwrap_or(u64::MAX);
 
     reader
-        .seek(std::io::SeekFrom::Start(start.unwrap_or_default()))
+        .seek(std::io::SeekFrom::Start(offset))
         .await?;
 
     loop {
@@ -198,6 +163,8 @@ where
         reader.read_exact(&mut len_buf).await?;
         let val_len = u16::from_be_bytes(len_buf) as usize;
 
+        reader.read_exact(&mut type_tag_buf).await?;
+
         key_buf.resize(key_len, 0);
         reader.read_exact(&mut key_buf).await?;
         let read_key = String::from_utf8(std::mem::take(&mut key_buf))
@@ -206,9 +173,8 @@ where
         if read_key == key {
             let mut val_buf = vec![0u8; val_len];
             reader.read_exact(&mut val_buf).await?;
-            let val_str =
-                String::from_utf8(val_buf).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-            return Ok(Some(val_str));
+            let value = MemValue::deserialize(type_tag_buf[0], &val_buf);
+            return value.map(|x| Some(x))
         }
 
         reader.seek(SeekFrom::Current(val_len as i64)).await?;

@@ -37,7 +37,7 @@ pub fn bounds(index: &SparseIndex, key: &str) -> ScanRange {
 
 /// Writes a sparse index to the given writer.
 /// Each entry: [key_len (u16)][key bytes][offset (u64)]
-pub async fn write_sparse_index<W>(index: &SparseIndex, writer: &mut W) -> Result<()>
+pub async fn write_to<W>(index: &SparseIndex, writer: &mut W) -> Result<()>
 where
     W: AsyncWrite + Unpin,
 {
@@ -55,7 +55,7 @@ where
 
 /// Reads a sparse index from the given reader.
 /// Each entry: [key_len (u16)][key bytes][offset (u64)]
-pub async fn read_sparse_index<R>(mut reader: R) -> Result<SparseIndex>
+pub async fn read_from<R>(mut reader: R) -> Result<SparseIndex>
 where
     R: AsyncReadExt + Unpin,
 {

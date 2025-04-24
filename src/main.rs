@@ -1,6 +1,6 @@
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Result};
 
-use my_database::{Config, Database};
+use my_database::{Config, Database, Value};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -46,17 +46,23 @@ async fn parse(command: &str, database: &mut Database) -> Result<()> {
 
     match args.get(0) {
         Some(&"get") => {
-            let value = database.get(args.get(1).unwrap()).await?;
+            let value = database.get(args.get(1).unwrap()).await?.map(|x| match x {
+                Value::Str(s) => s,
+                Value::Int64(i) => format!("i:{}", i.to_string()),
+                Value::Float64(f) => format!("f:{}", f.to_string()),
+            });
+
             println!("{}", value.unwrap_or("(none)".to_string()));
         }
         Some(&"set") => {
             database
                 .set(
                     args.get(1).unwrap().to_string(),
-                    args.get(2).unwrap().to_string(),
+                    parse_value(args.get(2).unwrap()),
                 )
                 .await?;
         }
+        Some(&"delete") => database.delete(args.get(1).unwrap().to_string()).await?,
         Some(&"flush") => database.flush().await?,
         _ => (),
     };
@@ -64,12 +70,27 @@ async fn parse(command: &str, database: &mut Database) -> Result<()> {
     Ok(())
 }
 
+fn parse_value(input: &str) -> Value {
+    if let Some(rest) = input.strip_prefix("i:") {
+        if let Ok(num) = rest.parse::<i64>() {
+            return Value::Int64(num);
+        }
+    } else if let Some(rest) = input.strip_prefix("f:") {
+        if let Ok(num) = rest.parse::<f64>() {
+            return Value::Float64(num);
+        }
+    }
+
+    // Fallback to string
+    Value::Str(input.to_string())
+}
+
 async fn load_words_into_db(database: &mut Database) -> Result<()> {
     let content = tokio::fs::read_to_string("words.txt").await?;
     let lines: Vec<_> = content.lines().map(|line| line.to_string()).collect();
 
     for line in lines {
-        let reversed = line.chars().rev().collect();
+        let reversed = Value::Str(line.chars().rev().collect());
         database.set(line, reversed).await?;
     }
 
