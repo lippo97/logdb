@@ -167,7 +167,13 @@ async fn parse<W: AsyncWrite + Unpin>(
                 .delete(args.get(1).unwrap().to_string())
                 .await
         }
+        Some(&"compact") => database.write().await.compact().await,
         Some(&"flush") => database.write().await.flush().await,
+        Some(&"dump") => database.write().await.dump().await,
+        Some(&"words") => {
+            let mut db = database.write().await;
+            load_words_into_db(&mut db).await
+        }
         _ => Ok(()),
     }
 }
@@ -192,6 +198,7 @@ async fn load_words_into_db(database: &mut Database) -> Result<()> {
     let lines: Vec<_> = content.lines().map(|line| line.to_string()).collect();
 
     for line in lines {
+        // let strip = Value::Str(line.chars().take(3).collect());
         let reversed = Value::Str(line.chars().rev().collect());
         database.set(line, reversed).await?;
     }

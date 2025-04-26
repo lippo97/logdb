@@ -1,10 +1,33 @@
-use std::io::{Error, ErrorKind, Result};
+use std::{
+    cmp::Ordering,
+    io::{Error, ErrorKind, Result},
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Record {
     pub key: String,
     pub value: MemValue,
+}
+
+impl PartialEq for Record {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl Eq for Record {}
+
+impl PartialOrd for Record {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Record {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.key.cmp(&other.key)
+    }
 }
 
 impl Record {

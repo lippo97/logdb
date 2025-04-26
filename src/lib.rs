@@ -1,3 +1,4 @@
+use futures::future::try_join_all;
 use log;
 use memtable::MemTable;
 use record::MemValue;
@@ -6,8 +7,10 @@ use std::{collections::BTreeMap, path::Path};
 use tokio::{
     fs::File,
     io::{AsyncWriteExt, BufReader, BufWriter, Error, Result},
+    join,
 };
 
+mod compact;
 mod config;
 mod manifest;
 mod memtable;
@@ -31,8 +34,7 @@ impl Database {
     pub async fn build(config: Config) -> Result<Self> {
         let manifest =
             Self::get_or_create_manifest(&config.data_dir, config.create_if_missing).await?;
-
-        log::info!("Using configuration: {:#?}", manifest);
+        log::info!("Using configuration:\n{:#?}", manifest);
         let sstable_set = SSTableSet::build(&manifest, Some(&config.data_dir)).await?;
 
         Ok(Self {
@@ -94,7 +96,7 @@ impl Database {
 
     pub async fn get(&self, key: &str) -> Result<Option<Value>> {
         if let Some(inner) = self.memtable.get(key) {
-            return Ok(inner.clone().to_value())
+            return Ok(inner.clone().to_value());
         }
 
         for SSTable {
@@ -118,6 +120,79 @@ impl Database {
 
     pub async fn delete(&mut self, key: String) -> Result<()> {
         self.memtable.insert(key, MemValue::Tombstone);
+        Ok(())
+    }
+
+    pub async fn compact(&mut self) -> Result<()> {
+        if self.sstable_set.tables.len() < 2 {
+            return Ok(());
+        }
+
+        let data_path_part = self.config.data_dir.join("compact.db.part");
+        let idx_path_part = self.config.data_dir.join("compact.idx.part");
+        let final_data_path = self.config.data_dir.join("00001.db");
+        let final_idx_path = self.config.data_dir.join("00001.idx");
+
+        let data_files: Vec<_> = self
+            .sstable_set
+            .tables
+            .iter()
+            .map(|x| self.config.data_dir.join(&x.data_path))
+            .collect();
+        let index_files: Vec<_> = self
+            .sstable_set
+            .tables
+            .iter()
+            .map(|x| self.config.data_dir.join(&x.index_path))
+            .collect();
+        let mut output = File::create(&data_path_part).await?;
+        let mut output_idx = File::create(&idx_path_part).await?;
+
+        log::info!("Starting log compaction.");
+        log::info!("Input log files: {:#?}", data_files,);
+        log::info!("Output log file: {}", data_path_part.to_str().unwrap());
+        let index = compact::compact_sstable_set(
+            &mut self.sstable_set,
+            &mut output,
+            &self.config.data_dir,
+            self.config.sparse_stride,
+        )
+        .await?;
+        sparse_index::write_to(&index, &mut output_idx).await?;
+        log::info!("Finished log compaction.");
+
+        log::info!("Deleting input files: {:?}", data_files);
+        let _ = try_join_all(
+            data_files
+                .into_iter()
+                .chain(index_files)
+                .map(tokio::fs::remove_file),
+        )
+        .await?;
+        let _ = join!(
+            tokio::fs::rename(data_path_part, final_data_path),
+            tokio::fs::rename(idx_path_part, final_idx_path),
+        );
+
+        self.sstable_set.tables.clear();
+        self.sstable_set.tables.push(SSTable {
+            index,
+            index_path: "00001.idx".to_string(),
+            data_path: "00001.db".to_string(),
+        });
+        self.sstable_set.last_sequence = 1;
+
+        let manifest_path = Database::get_manifest_path(&self.config.data_dir);
+        log::info!("Updating manifest file: {}...", &manifest_path);
+        manifest::write_manifest(
+            &Manifest::new(&self.sstable_set),
+            &mut BufWriter::new(File::create(&manifest_path).await?),
+        )
+        .await
+    }
+
+    pub async fn dump(&self) -> Result<()> {
+        log::info!("Dumping memtable:\n{:#?}", self.memtable);
         Ok(())
     }
 
