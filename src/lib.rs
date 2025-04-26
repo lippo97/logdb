@@ -136,8 +136,6 @@ impl Database for DatabaseImpl {
         self.memtable.insert(key, MemValue::Tombstone);
         Ok(())
     }
-
-
 }
 
 impl DatabaseAdmin for DatabaseImpl {

@@ -101,10 +101,10 @@ where
         ScanRange::Exact { offset } => {
             let record = read_exact(file, offset).await?;
             if record.key != key {
-                panic!(
+                return Err(Error::new(
+                    ErrorKind::Other,
                     "Exact key read doesn't match expected key: read_key={}",
-                    &record.key
-                );
+                ));
             }
             Ok(Some(record.value))
         }

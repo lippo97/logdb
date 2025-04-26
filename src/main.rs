@@ -89,11 +89,7 @@ async fn accept_connections(
     }
 }
 
-async fn handle_connection(
-    socket: TcpStream,
-    addr: SocketAddr,
-    database: Db,
-) -> Result<()> {
+async fn handle_connection(socket: TcpStream, addr: SocketAddr, database: Db) -> Result<()> {
     let (read, mut write) = tokio::io::split(socket);
     let read = BufReader::new(read);
     log::info!("Client connection from {}:{}", addr.ip(), addr.port());
@@ -127,11 +123,7 @@ where
     Ok(())
 }
 
-async fn parse<W: AsyncWrite + Unpin>(
-    command: &str,
-    database: &Db,
-    output: &mut W,
-) -> Result<()> {
+async fn parse<W: AsyncWrite + Unpin>(command: &str, database: &Db, output: &mut W) -> Result<()> {
     let args: Vec<_> = command.split_whitespace().collect();
 
     match args.get(0) {
@@ -172,9 +164,7 @@ async fn parse<W: AsyncWrite + Unpin>(
         Some(&"compact") => database.write().await.compact().await,
         Some(&"flush") => database.write().await.flush().await,
         Some(&"dump") => database.write().await.dump().await,
-        Some(&"words") => {
-            load_words_into_db(database.clone()).await
-        }
+        Some(&"words") => load_words_into_db(database.clone()).await,
         _ => Ok(()),
     }
 }
