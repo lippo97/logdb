@@ -1,9 +1,14 @@
 use std::sync::Arc;
 
+use core::net::SocketAddr;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Error, Result},
-    net::TcpListener,
-    sync::RwLock,
+    net::{TcpListener, TcpStream},
+    sync::{
+        RwLock,
+        watch::{self, Receiver},
+    },
+    task::JoinSet,
 };
 
 use my_database::{Config, Database, Value};
@@ -24,19 +29,75 @@ async fn main() -> Result<()> {
 
     let listener = TcpListener::bind("127.0.0.1:2345").await?;
 
-    loop {
-        let (socket, conn) = listener.accept().await?;
-        let (read, mut write) = tokio::io::split(socket);
-        let read = BufReader::new(read);
+    let db = database.clone();
+    let (tx, rx) = watch::channel(());
 
-        let db = database.clone();
-        tokio::spawn(async move {
-            log::info!("Client connection from {}:{}", conn.ip(), conn.port());
-            repl(db, read, &mut write).await?;
-            log::info!("Closed connection from {}:{}", conn.ip(), conn.port());
-            Ok::<_, Error>(())
-        });
+    let listener_handle = tokio::spawn(async move {
+        let _ = accept_connections(listener, db, rx).await;
+    });
+
+    let stdin = BufReader::new(tokio::io::stdin());
+    let mut stdout = tokio::io::stdout();
+    repl(database.clone(), stdin, &mut stdout).await?;
+
+    let _ = tx.send(());
+    listener_handle.await?;
+
+    Ok(())
+}
+
+async fn accept_connections(
+    listener: TcpListener,
+    db: Arc<RwLock<Database>>,
+    shutdown_signal_rx: Receiver<()>,
+) -> Result<()> {
+    let mut shutdown_signal_rx2 = shutdown_signal_rx.clone();
+    let mut connections = JoinSet::new();
+
+    tokio::select! {
+        Ok::<_, Error>(()) = async {
+            loop {
+                let (socket, conn) = listener.accept().await?;
+
+                let db = db.clone();
+                let mut rx_socket = shutdown_signal_rx.clone();
+                connections.spawn(async move {
+                    tokio::select! {
+                        _ = handle_connection(socket, conn, db) => {},
+                        _ = rx_socket.changed() => {
+                            log::info!("Socket {}:{} shutdown requested", conn.ip(), conn.port());
+                        }
+                    }
+                });
+            }
+        } => {
+            Ok(())
+        },
+        _ = shutdown_signal_rx2.changed() => {
+            log::info!("Shutdown requested.");
+
+            while let Some(res) = connections.join_next().await {
+                if let Err(e) = res {
+                    log::warn!("Connection handler exited with error: {:?}", e)
+                }
+            }
+
+            Ok(())
+        },
     }
+}
+
+async fn handle_connection(
+    socket: TcpStream,
+    addr: SocketAddr,
+    database: Arc<RwLock<Database>>,
+) -> Result<()> {
+    let (read, mut write) = tokio::io::split(socket);
+    let read = BufReader::new(read);
+    log::info!("Client connection from {}:{}", addr.ip(), addr.port());
+    repl(database, read, &mut write).await?;
+    log::info!("Closed connection from {}:{}", addr.ip(), addr.port());
+    Ok::<_, Error>(())
 }
 
 async fn repl<R, W>(database: Arc<RwLock<Database>>, input: R, output: &mut W) -> Result<()>
@@ -126,14 +187,14 @@ fn parse_value(input: &str) -> Value {
     Value::Str(input.to_string())
 }
 
-// async fn load_words_into_db(database: &mut Database) -> Result<()> {
-//     let content = tokio::fs::read_to_string("words.txt").await?;
-//     let lines: Vec<_> = content.lines().map(|line| line.to_string()).collect();
-//
-//     for line in lines {
-//         let reversed = Value::Str(line.chars().rev().collect());
-//         database.set(line, reversed).await?;
-//     }
-//
-//     database.flush().await
-// }
+async fn load_words_into_db(database: &mut Database) -> Result<()> {
+    let content = tokio::fs::read_to_string("words.txt").await?;
+    let lines: Vec<_> = content.lines().map(|line| line.to_string()).collect();
+
+    for line in lines {
+        let reversed = Value::Str(line.chars().rev().collect());
+        database.set(line, reversed).await?;
+    }
+
+    database.flush().await
+}
