@@ -93,10 +93,8 @@ impl Database {
     }
 
     pub async fn get(&self, key: &str) -> Result<Option<Value>> {
-        let value = self.memtable.get(key);
-
-        if value.is_some() {
-            return Ok(value.cloned().and_then(MemValue::to_value));
+        if let Some(inner) = self.memtable.get(key) {
+            return Ok(inner.clone().to_value())
         }
 
         for SSTable {
