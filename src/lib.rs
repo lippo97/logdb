@@ -1,4 +1,5 @@
 use log;
+use memtable::MemTable;
 use record::MemValue;
 use sstable_set::{SSTable, SSTableSet};
 use std::{collections::BTreeMap, path::Path};
@@ -17,7 +18,6 @@ mod version;
 
 pub use config::Config;
 pub use manifest::Manifest;
-use memtable::MemTable;
 pub use record::Value;
 
 #[derive(Debug)]
