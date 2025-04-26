@@ -103,9 +103,9 @@ impl Database {
         {
             let range = sparse_index::bounds(&index, key);
             let mut file = BufReader::new(File::open(&self.config.data_dir.join(data_path)).await?);
-            let read = sstable_set::seek_and_read(&mut file, key, range).await?;
-            if read.is_some() {
-                return Ok(read.and_then(MemValue::to_value));
+
+            if let Some(inner) = sstable_set::seek_and_read(&mut file, key, range).await? {
+                return Ok(inner.to_value());
             }
         }
         Ok(None)
