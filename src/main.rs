@@ -29,18 +29,18 @@ async fn main() -> Result<()> {
 
     let listener = TcpListener::bind("127.0.0.1:2345").await?;
 
-    let db = database.clone();
-    let (tx, rx) = watch::channel(());
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
 
+    let db = database.clone();
     let listener_handle = tokio::spawn(async move {
-        let _ = accept_connections(listener, db, rx).await;
+        let _ = accept_connections(listener, db, shutdown_rx).await;
     });
 
     let stdin = BufReader::new(tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
-    repl(database.clone(), stdin, &mut stdout).await?;
+    repl(database, stdin, &mut stdout).await?;
 
-    let _ = tx.send(());
+    let _ = shutdown_tx.send(());
     listener_handle.await?;
 
     Ok(())
@@ -49,9 +49,9 @@ async fn main() -> Result<()> {
 async fn accept_connections(
     listener: TcpListener,
     db: Arc<RwLock<Database>>,
-    shutdown_signal_rx: Receiver<()>,
+    shutdown_rx: Receiver<()>,
 ) -> Result<()> {
-    let mut shutdown_signal_rx2 = shutdown_signal_rx.clone();
+    let mut shutdown_rx_main = shutdown_rx.clone();
     let mut connections = JoinSet::new();
 
     tokio::select! {
@@ -60,11 +60,11 @@ async fn accept_connections(
                 let (socket, conn) = listener.accept().await?;
 
                 let db = db.clone();
-                let mut rx_socket = shutdown_signal_rx.clone();
+                let mut shutdown_rx_task = shutdown_rx.clone();
                 connections.spawn(async move {
                     tokio::select! {
                         _ = handle_connection(socket, conn, db) => {},
-                        _ = rx_socket.changed() => {
+                        _ = shutdown_rx_task.changed() => {
                             log::info!("Socket {}:{} shutdown requested", conn.ip(), conn.port());
                         }
                     }
@@ -73,7 +73,7 @@ async fn accept_connections(
         } => {
             Ok(())
         },
-        _ = shutdown_signal_rx2.changed() => {
+        _ = shutdown_rx_main.changed() => {
             log::info!("Shutdown requested.");
 
             while let Some(res) = connections.join_next().await {
