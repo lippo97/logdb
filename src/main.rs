@@ -11,14 +11,16 @@ use tokio::{
     task::JoinSet,
 };
 
-use my_database::{Config, Database, Value};
+use my_database::{Config, Database, DatabaseAdmin, DatabaseImpl, Value};
+
+type Db = Arc<RwLock<DatabaseImpl>>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
 
     let database = Arc::new(RwLock::new(
-        Database::build(Config {
+        DatabaseImpl::build(Config {
             data_dir: "data".into(),
             sparse_stride: 20,
             memtable_capacity: 1000,
@@ -48,7 +50,7 @@ async fn main() -> Result<()> {
 
 async fn accept_connections(
     listener: TcpListener,
-    db: Arc<RwLock<Database>>,
+    db: Db,
     shutdown_rx: Receiver<()>,
 ) -> Result<()> {
     let mut shutdown_rx_main = shutdown_rx.clone();
@@ -90,7 +92,7 @@ async fn accept_connections(
 async fn handle_connection(
     socket: TcpStream,
     addr: SocketAddr,
-    database: Arc<RwLock<Database>>,
+    database: Db,
 ) -> Result<()> {
     let (read, mut write) = tokio::io::split(socket);
     let read = BufReader::new(read);
@@ -100,7 +102,7 @@ async fn handle_connection(
     Ok::<_, Error>(())
 }
 
-async fn repl<R, W>(database: Arc<RwLock<Database>>, input: R, output: &mut W) -> Result<()>
+async fn repl<R, W>(database: Db, input: R, output: &mut W) -> Result<()>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -127,7 +129,7 @@ where
 
 async fn parse<W: AsyncWrite + Unpin>(
     command: &str,
-    database: &Arc<RwLock<Database>>,
+    database: &Db,
     output: &mut W,
 ) -> Result<()> {
     let args: Vec<_> = command.split_whitespace().collect();
@@ -171,8 +173,7 @@ async fn parse<W: AsyncWrite + Unpin>(
         Some(&"flush") => database.write().await.flush().await,
         Some(&"dump") => database.write().await.dump().await,
         Some(&"words") => {
-            let mut db = database.write().await;
-            load_words_into_db(&mut db).await
+            load_words_into_db(database.clone()).await
         }
         _ => Ok(()),
     }
@@ -188,20 +189,19 @@ fn parse_value(input: &str) -> Value {
             return Value::Float64(num);
         }
     }
-
-    // Fallback to string
     Value::Str(input.to_string())
 }
 
-async fn load_words_into_db(database: &mut Database) -> Result<()> {
+async fn load_words_into_db(database: Db) -> Result<()> {
     let content = tokio::fs::read_to_string("words.txt").await?;
     let lines: Vec<_> = content.lines().map(|line| line.to_string()).collect();
+    let mut db = database.write().await;
 
     for line in lines {
         // let strip = Value::Str(line.chars().take(3).collect());
         let reversed = Value::Str(line.chars().rev().collect());
-        database.set(line, reversed).await?;
+        db.set(line, reversed).await?;
     }
 
-    database.flush().await
+    db.flush().await
 }

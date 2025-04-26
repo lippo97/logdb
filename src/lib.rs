@@ -24,13 +24,25 @@ pub use manifest::Manifest;
 pub use record::Value;
 
 #[derive(Debug)]
-pub struct Database {
+pub struct DatabaseImpl {
     memtable: MemTable,
     sstable_set: SSTableSet,
     config: Config,
 }
 
-impl Database {
+pub trait Database {
+    fn get(&self, key: &str) -> impl Future<Output = Result<Option<Value>>> + Send;
+    fn set(&mut self, key: String, value: Value) -> impl Future<Output = Result<()>> + Send;
+    fn delete(&mut self, key: String) -> impl Future<Output = Result<()>> + Send;
+}
+
+pub trait DatabaseAdmin {
+    fn compact(&mut self) -> impl Future<Output = Result<()>> + Send;
+    fn dump(&self) -> impl Future<Output = Result<()>> + Send;
+    fn flush(&mut self) -> impl Future<Output = Result<()>> + Send;
+}
+
+impl DatabaseImpl {
     pub async fn build(config: Config) -> Result<Self> {
         let manifest =
             Self::get_or_create_manifest(&config.data_dir, config.create_if_missing).await?;
@@ -44,7 +56,92 @@ impl Database {
         })
     }
 
-    pub async fn flush(&mut self) -> Result<()> {
+    async fn get_or_create_manifest(data_dir: &Path, create_if_missing: bool) -> Result<Manifest> {
+        let manifest_path = Self::get_manifest_path(data_dir);
+        let manifest_exists = tokio::fs::metadata(&manifest_path).await.is_ok();
+
+        if manifest_exists {
+            log::info!("Manifest file detected: {}", &manifest_path);
+            let contents = tokio::fs::read_to_string(&manifest_path).await?;
+            return toml::from_str::<Manifest>(&contents).map_err(|_| {
+                Error::new(
+                    tokio::io::ErrorKind::InvalidData,
+                    "Unable to parse MANIFEST file",
+                )
+            });
+        }
+        if !create_if_missing {
+            return Err(Error::new(
+                tokio::io::ErrorKind::NotFound,
+                format!(
+                    "No such file {} (with option `create_if_missing = false`)",
+                    &manifest_path
+                ),
+            ));
+        }
+
+        let manifest = Manifest {
+            sstables: Vec::new(),
+            last_sequence: 0,
+            version: version::VERSION.to_string(),
+        };
+        let manifest_path = Self::get_manifest_path(data_dir);
+
+        log::info!("Creating manifest file: {}...", &manifest_path);
+        manifest::write_manifest(
+            &manifest,
+            &mut BufWriter::new(File::create(&manifest_path).await?),
+        )
+        .await?;
+        log::info!("Done.");
+
+        Ok(manifest)
+    }
+
+    fn get_manifest_path(data_dir: &Path) -> String {
+        data_dir
+            .join("MANIFEST")
+            .into_os_string()
+            .into_string()
+            .unwrap()
+    }
+}
+
+impl Database for DatabaseImpl {
+    async fn get(&self, key: &str) -> Result<Option<Value>> {
+        if let Some(inner) = self.memtable.get(key) {
+            return Ok(inner.clone().to_value());
+        }
+
+        for SSTable {
+            index, data_path, ..
+        } in &self.sstable_set.tables
+        {
+            let range = sparse_index::bounds(&index, key);
+            let mut file = BufReader::new(File::open(&self.config.data_dir.join(data_path)).await?);
+
+            if let Some(inner) = sstable_set::seek_and_read(&mut file, key, range).await? {
+                return Ok(inner.to_value());
+            }
+        }
+        Ok(None)
+    }
+
+    async fn set(&mut self, key: String, value: Value) -> Result<()> {
+        self.memtable.insert(key, MemValue::Value(value));
+        Ok(())
+    }
+
+    async fn delete(&mut self, key: String) -> Result<()> {
+        self.memtable.insert(key, MemValue::Tombstone);
+        Ok(())
+    }
+
+
+}
+
+impl DatabaseAdmin for DatabaseImpl {
+    async fn flush(&mut self) -> Result<()> {
         let next_sequence = self.sstable_set.last_sequence + 1;
         let data_path = format!("{:0>5}.db", next_sequence);
         let index_path = format!("{:0>5}.idx", next_sequence);
@@ -94,36 +191,7 @@ impl Database {
         Ok(())
     }
 
-    pub async fn get(&self, key: &str) -> Result<Option<Value>> {
-        if let Some(inner) = self.memtable.get(key) {
-            return Ok(inner.clone().to_value());
-        }
-
-        for SSTable {
-            index, data_path, ..
-        } in &self.sstable_set.tables
-        {
-            let range = sparse_index::bounds(&index, key);
-            let mut file = BufReader::new(File::open(&self.config.data_dir.join(data_path)).await?);
-
-            if let Some(inner) = sstable_set::seek_and_read(&mut file, key, range).await? {
-                return Ok(inner.to_value());
-            }
-        }
-        Ok(None)
-    }
-
-    pub async fn set(&mut self, key: String, value: Value) -> Result<()> {
-        self.memtable.insert(key, MemValue::Value(value));
-        Ok(())
-    }
-
-    pub async fn delete(&mut self, key: String) -> Result<()> {
-        self.memtable.insert(key, MemValue::Tombstone);
-        Ok(())
-    }
-
-    pub async fn compact(&mut self) -> Result<()> {
+    async fn compact(&mut self) -> Result<()> {
         if self.sstable_set.tables.len() < 2 {
             return Ok(());
         }
@@ -182,7 +250,7 @@ impl Database {
         });
         self.sstable_set.last_sequence = 1;
 
-        let manifest_path = Database::get_manifest_path(&self.config.data_dir);
+        let manifest_path = DatabaseImpl::get_manifest_path(&self.config.data_dir);
         log::info!("Updating manifest file: {}...", &manifest_path);
         manifest::write_manifest(
             &Manifest::new(&self.sstable_set),
@@ -191,58 +259,8 @@ impl Database {
         .await
     }
 
-    pub async fn dump(&self) -> Result<()> {
+    async fn dump(&self) -> Result<()> {
         log::info!("Dumping memtable:\n{:#?}", self.memtable);
         Ok(())
-    }
-
-    async fn get_or_create_manifest(data_dir: &Path, create_if_missing: bool) -> Result<Manifest> {
-        let manifest_path = Self::get_manifest_path(data_dir);
-        let manifest_exists = tokio::fs::metadata(&manifest_path).await.is_ok();
-
-        if manifest_exists {
-            log::info!("Manifest file detected: {}", &manifest_path);
-            let contents = tokio::fs::read_to_string(&manifest_path).await?;
-            return toml::from_str::<Manifest>(&contents).map_err(|_| {
-                Error::new(
-                    tokio::io::ErrorKind::InvalidData,
-                    "Unable to parse MANIFEST file",
-                )
-            });
-        }
-        if !create_if_missing {
-            return Err(Error::new(
-                tokio::io::ErrorKind::NotFound,
-                format!(
-                    "No such file {} (with option `create_if_missing = false`)",
-                    &manifest_path
-                ),
-            ));
-        }
-
-        let manifest = Manifest {
-            sstables: Vec::new(),
-            last_sequence: 0,
-            version: version::VERSION.to_string(),
-        };
-        let manifest_path = Self::get_manifest_path(data_dir);
-
-        log::info!("Creating manifest file: {}...", &manifest_path);
-        manifest::write_manifest(
-            &manifest,
-            &mut BufWriter::new(File::create(&manifest_path).await?),
-        )
-        .await?;
-        log::info!("Done.");
-
-        Ok(manifest)
-    }
-
-    fn get_manifest_path(data_dir: &Path) -> String {
-        data_dir
-            .join("MANIFEST")
-            .into_os_string()
-            .into_string()
-            .unwrap()
     }
 }
