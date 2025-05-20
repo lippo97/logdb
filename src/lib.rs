@@ -12,6 +12,7 @@ use tokio::{
 
 mod compact;
 mod config;
+mod controller;
 mod manifest;
 mod memtable;
 mod record;
@@ -19,6 +20,7 @@ mod sparse_index;
 mod sstable_set;
 mod version;
 
+pub use controller::Controller;
 pub use config::Config;
 pub use manifest::Manifest;
 pub use record::Value;
@@ -28,6 +30,7 @@ pub struct DatabaseImpl {
     memtable: MemTable,
     sstable_set: SSTableSet,
     config: Config,
+    current_size: usize,
 }
 
 pub trait Database {
@@ -53,6 +56,7 @@ impl DatabaseImpl {
             config,
             sstable_set,
             memtable: BTreeMap::new(),
+            current_size: 0,
         })
     }
 
@@ -105,6 +109,12 @@ impl DatabaseImpl {
             .into_string()
             .unwrap()
     }
+
+    fn remove_key_size(&mut self, key: &str) {
+        if let Some(old) = self.memtable.get(key) {
+            self.current_size -= key.len() + old.len()
+        }
+    }
 }
 
 impl Database for DatabaseImpl {
@@ -128,11 +138,14 @@ impl Database for DatabaseImpl {
     }
 
     async fn set(&mut self, key: String, value: Value) -> Result<()> {
+        self.remove_key_size(&key);
+        self.current_size += key.len() + value.len();
         self.memtable.insert(key, MemValue::Value(value));
         Ok(())
     }
 
     async fn delete(&mut self, key: String) -> Result<()> {
+        self.remove_key_size(&key);
         self.memtable.insert(key, MemValue::Tombstone);
         Ok(())
     }

@@ -4,17 +4,22 @@ use core::net::SocketAddr;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Error, Result},
     net::{TcpListener, TcpStream},
-    sync::watch::{self, Receiver},
+    sync::{
+        RwLock,
+        watch::{self, Receiver},
+    },
     task::JoinSet,
 };
 
-use my_database::{Config, Controller, DatabaseImpl, Value};
+use my_database::{Config, Database, DatabaseAdmin, DatabaseImpl, Value};
+
+type Db = Arc<RwLock<DatabaseImpl>>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
 
-    let database = Controller::new(
+    let database = Arc::new(RwLock::new(
         DatabaseImpl::build(Config {
             data_dir: "data".into(),
             sparse_stride: 20,
@@ -22,23 +27,20 @@ async fn main() -> Result<()> {
             create_if_missing: true,
         })
         .await?,
-        50000
-    );
-
-    let db = Arc::new(database);
+    ));
 
     let listener = TcpListener::bind("127.0.0.1:2345").await?;
 
     let (shutdown_tx, shutdown_rx) = watch::channel(());
 
-    let db_clone = db.clone();
+    let db = database.clone();
     let listener_handle = tokio::spawn(async move {
-        let _ = accept_connections(listener, &db_clone, shutdown_rx).await;
+        let _ = accept_connections(listener, db, shutdown_rx).await;
     });
 
     let stdin = BufReader::new(tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
-    repl(&db, stdin, &mut stdout).await?;
+    repl(database, stdin, &mut stdout).await?;
 
     let _ = shutdown_tx.send(());
     listener_handle.await?;
@@ -48,7 +50,7 @@ async fn main() -> Result<()> {
 
 async fn accept_connections(
     listener: TcpListener,
-    db: &Arc<Controller>,
+    db: Db,
     shutdown_rx: Receiver<()>,
 ) -> Result<()> {
     let mut shutdown_rx_main = shutdown_rx.clone();
@@ -63,7 +65,7 @@ async fn accept_connections(
                 let mut shutdown_rx_task = shutdown_rx.clone();
                 connections.spawn(async move {
                     tokio::select! {
-                        _ = handle_connection(socket, conn, &db) => {},
+                        _ = handle_connection(socket, conn, db) => {},
                         _ = shutdown_rx_task.changed() => {
                             log::info!("Socket {}:{} shutdown requested", conn.ip(), conn.port());
                         }
@@ -87,7 +89,7 @@ async fn accept_connections(
     }
 }
 
-async fn handle_connection(socket: TcpStream, addr: SocketAddr, database: &Controller) -> Result<()> {
+async fn handle_connection(socket: TcpStream, addr: SocketAddr, database: Db) -> Result<()> {
     let (read, mut write) = tokio::io::split(socket);
     let read = BufReader::new(read);
     log::info!("Client connection from {}:{}", addr.ip(), addr.port());
@@ -96,7 +98,7 @@ async fn handle_connection(socket: TcpStream, addr: SocketAddr, database: &Contr
     Ok::<_, Error>(())
 }
 
-async fn repl<R, W>(database: &Controller, input: R, output: &mut W) -> Result<()>
+async fn repl<R, W>(database: Db, input: R, output: &mut W) -> Result<()>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -121,12 +123,14 @@ where
     Ok(())
 }
 
-async fn parse<W: AsyncWrite + Unpin>(command: &str, database: &Controller, output: &mut W) -> Result<()> {
+async fn parse<W: AsyncWrite + Unpin>(command: &str, database: &Db, output: &mut W) -> Result<()> {
     let args: Vec<_> = command.split_whitespace().collect();
 
     match args.get(0) {
         Some(&"get") => {
             let value = database
+                .read()
+                .await
                 .get(args.get(1).unwrap())
                 .await?
                 .map(|x| match x {
@@ -142,6 +146,8 @@ async fn parse<W: AsyncWrite + Unpin>(command: &str, database: &Controller, outp
         }
         Some(&"set") => {
             database
+                .write()
+                .await
                 .set(
                     args.get(1).unwrap().to_string(),
                     parse_value(args.get(2).unwrap()),
@@ -150,13 +156,15 @@ async fn parse<W: AsyncWrite + Unpin>(command: &str, database: &Controller, outp
         }
         Some(&"delete") => {
             database
+                .write()
+                .await
                 .delete(args.get(1).unwrap().to_string())
                 .await
         }
-        // Some(&"compact") => database.compact().await,
-        // Some(&"flush") => database.flush().await,
-        // Some(&"dump") => database.dump().await,
-        Some(&"words") => load_words_into_db(database).await,
+        Some(&"compact") => database.write().await.compact().await,
+        Some(&"flush") => database.write().await.flush().await,
+        Some(&"dump") => database.write().await.dump().await,
+        Some(&"words") => load_words_into_db(database.clone()).await,
         _ => Ok(()),
     }
 }
@@ -174,15 +182,16 @@ fn parse_value(input: &str) -> Value {
     Value::Str(input.to_string())
 }
 
-async fn load_words_into_db(database: &Controller) -> Result<()> {
+async fn load_words_into_db(database: Db) -> Result<()> {
     let content = tokio::fs::read_to_string("words.txt").await?;
     let lines: Vec<_> = content.lines().map(|line| line.to_string()).collect();
+    let mut db = database.write().await;
 
     for line in lines {
         // let strip = Value::Str(line.chars().take(3).collect());
         let reversed = Value::Str(line.chars().rev().collect());
-        database.set(line, reversed).await?;
+        db.set(line, reversed).await?;
     }
-    
-    Ok(())
+
+    db.flush().await
 }

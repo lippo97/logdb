@@ -88,14 +88,15 @@ pub enum MemValue {
     Tombstone,
 }
 
-#[derive(Clone, Debug)]
-pub enum Value {
-    Str(String),
-    Int64(i64),
-    Float64(f64),
-}
-
 impl MemValue {
+    /// Returns the length of this `MemValue` in bytes.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Value(value) => value.len(),
+            Self::Tombstone => 0
+        }
+    }
+
     pub fn to_value(self) -> Option<Value> {
         match self {
             MemValue::Tombstone => None,
@@ -144,6 +145,24 @@ impl MemValue {
                 ErrorKind::InvalidData,
                 "Unable to deserialize record",
             )),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum Value {
+    Str(String),
+    Int64(i64),
+    Float64(f64),
+}
+
+impl Value {
+    /// Returns the length of this `Value` in bytes.
+    pub fn len(&self) -> usize {
+        match self {
+            Value::Str(value) => value.len(),
+            Value::Int64(_) => 8,
+            Value::Float64(_) => 8,
         }
     }
 }
