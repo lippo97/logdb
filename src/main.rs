@@ -41,7 +41,10 @@ async fn main() -> Result<()> {
     repl(&db, stdin, &mut stdout).await?;
 
     let _ = shutdown_tx.send(());
+
     listener_handle.await?;
+    log::info!("Closed network socket.");
+    db.shutdown().await?;
 
     Ok(())
 }
@@ -74,7 +77,7 @@ async fn accept_connections(
             Ok(())
         },
         _ = shutdown_rx_main.changed() => {
-            log::info!("Shutdown requested.");
+            log::info!("Socket shutdown requested.");
 
             while let Some(res) = connections.join_next().await {
                 if let Err(e) = res {
